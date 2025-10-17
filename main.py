@@ -5,6 +5,9 @@ from google import genai
 from google.genai import types
 
 from functions.function_declarations import schema_get_files_info, schema_get_file_content, schema_run_python_file, schema_write_file
+from functions.get_files_info import get_files_info, get_file_content, run_python_file, write_file
+
+WORKING_DIR = "./calculator"
 
 def main():
   load_dotenv()
@@ -33,7 +36,14 @@ def main():
     types.Content(role="user", parts=[types.Part(text=user_prompt)])
   ]
   
-  generate_content(client, messages, verbose)
+  for i in range(20):
+    try:
+      response = generate_content(client, messages, verbose)
+      if response.text:
+        print(response.text)
+        break
+    except Exception as e:
+      print(f"Error generating content: {e}")
    
 
 def generate_content(client, messages, verbose):
@@ -68,14 +78,69 @@ def generate_content(client, messages, verbose):
       system_instruction = system_prompt
     )
   )
+  
+  for candidate in response.candidates:
+    messages.append(candidate.content)
+  
   if verbose:
     print(f'Prompt tokens: {response.usage_metadata.prompt_token_count}')
     print(f'Response tokens: {response.usage_metadata.candidates_token_count}')
-  print("Response:")
-  print(response.text)
-  if response.function_calls:
-    for function_call_part in response.function_calls:
-      print(f"Calling function: {function_call_part.name}({function_call_part.args})")
+  
+  if not response.function_calls:
+    print(response.text)
+  
+  function_responses = []
+  for function_call_part in response.function_calls:
+      function_call_result = call_function(function_call_part, verbose)
+      if (
+          not function_call_result.parts
+          or not function_call_result.parts[0].function_response
+      ):
+          raise Exception("empty function call result")
+      if verbose:
+          print(f"-> {function_call_result.parts[0].function_response.response}")
+      function_responses.append(function_call_result.parts[0])
+      messages.append(types.Content(role="user", parts=[types.Part(text=function_call_result.parts[0])]))
+
+  if not function_responses:
+      raise Exception("no function responses generated, exiting.")
+
+def call_function(function_call_part, verbose=False):
+    if verbose:
+        print(
+            f" - Calling function: {function_call_part.name}({function_call_part.args})"
+        )
+    else:
+        print(f" - Calling function: {function_call_part.name}")
+    function_map = {
+        "get_files_info": get_files_info,
+        "get_file_content": get_file_content,
+        "run_python_file": run_python_file,
+        "write_file": write_file,
+    }
+    function_name = function_call_part.name
+    if function_name not in function_map:
+        return types.Content(
+            role="tool",
+            parts=[
+                types.Part.from_function_response(
+                    name=function_name,
+                    response={"error": f"Unknown function: {function_name}"},
+                )
+            ],
+        )
+    args = dict(function_call_part.args)
+    args["working_directory"] = WORKING_DIR
+    function_result = function_map[function_name](**args)
+    return types.Content(
+        role="tool",
+        parts=[
+            types.Part.from_function_response(
+                name=function_name,
+                response={"result": function_result},
+            )
+        ],
+    )
 
 if __name__ == "__main__":
     main()
